@@ -88,10 +88,7 @@ def flash_attention_fwd_with_4d_mask(
             if has_score:
                 T.copy(Score[bidz, query_head, q_start:q_end, iter_kv_start:iter_kv_end], rScore)
                 for i, j in T.Parallel(BM, BN):
-                    rPc[i, j] = T.if_then_else(
-                        T.bitwise_and(iter_kv_start + j < kv_end, q_start + i < Tq),
-                        rPc[i, j] + rScore[j, i], rPc[i, j]
-                    )
+                    rPc[i, j] += rScore[i, j]
 
             if is_causal:
                 for i, j in T.Parallel(BM, BN):
@@ -112,7 +109,7 @@ def flash_attention_fwd_with_4d_mask(
                 T.copy(Mask[bidz, query_head, q_start:q_end, iter_kv_start:iter_kv_end], rMask)
                 for i, j in T.Parallel(BM, BN):
                     rPc[i, j] = T.if_then_else(
-                        T.bitwise_and(iter_kv_start + j < kv_end, q_start + i >= iter_kv_start + j) and rMask[i, j] == 1,
+                        T.bitwise_and(iter_kv_start + j < kv_end, rMask[i, j] == 1),
                         rPc[i, j],
                         -T.infinity(accum_dtype)
                     )
@@ -145,7 +142,7 @@ def flash_attention_fwd_with_4d_mask(
 ###################### BWD ######################
 @tilelang.jit(pass_configs=PASS_CFG)
 def bwd_preprocess(
-    O, dO, Delta, Rightpad,
+    O, dO, Delta,
     dtype: T.DType,
     BM: int=64,
     BK: int=32,
@@ -208,7 +205,7 @@ def flash_attention_bwd_with_4d_mask_atomic(
         sQ = T.alloc_shared([BN, D], dtype)
         sK = T.alloc_shared([BM, D], dtype)
         sV = T.alloc_shared([BM, D], dtype)
-        sO = T.alloc_fragment([BN, D], dtype)
+        sO = T.alloc_shared([BN, D], dtype)
         sP = T.alloc_shared([BM, BN], dtype)
         sdS = T.alloc_shared([BM, BN], dtype)
         sdK = T.alloc_shared([BM, D], accum_dtype)
@@ -250,10 +247,7 @@ def flash_attention_bwd_with_4d_mask_atomic(
             if has_score:
                 T.copy(Score[bidz, bidy, tile_q_start:tile_q_end, kv_start:kv_end], rScore)
                 for i, j in T.Parallel(BM, BN):
-                    rPc[i, j] = T.if_then_else(
-                        T.bitwise_and(tile_q_start + j < q_end, kv_start + i < Tk),
-                        rPc[i, j] + rScore[j, i], rPc[i, j]
-                    )
+                    rPc[i, j] += rScore[j, i]
 
             T.copy(LSE[bidz, tile_q_start:tile_q_end, bidy], rLSE)
             for i, j in T.Parallel(BM, BN):
@@ -267,10 +261,10 @@ def flash_attention_bwd_with_4d_mask_atomic(
                     )
             
             if has_mask:
-                T.copy(Mask[bidz, bidy, tile_q_start:tile_q_end, kv_start:kv_end])
+                T.copy(Mask[bidz, bidy, tile_q_start:tile_q_end, kv_start:kv_end], rMask)
                 for i, j in T.Parallel(BM, BN):
                     rPc[i, j] = T.if_then_else(
-                        T.bitwise_and(tile_q_start + j < q_end, kv_start + i < Tk) and rMask[j, i] ==1 ,
+                        rMask[j, i] == 1,
                         rPc[i, j], 0
                     )
             
@@ -329,7 +323,7 @@ def flash_attention_bwd_with_4d_mask_reduce(
         sQ = T.alloc_shared([BN, D], dtype)
         sK = T.alloc_shared([BM, D], dtype)
         sV = T.alloc_shared([BM, D], dtype)
-        sO = T.alloc_fragment([BN, D], dtype)
+        sO = T.alloc_shared([BN, D], dtype)
         sP = T.alloc_shared([BM, BN], dtype)
         sdS = T.alloc_shared([BM, BN], dtype)
         sdK = T.alloc_shared([BM, D], dtype)
@@ -371,10 +365,7 @@ def flash_attention_bwd_with_4d_mask_reduce(
             if has_score:
                 T.copy(Score[bidz, bidy, tile_q_start:tile_q_end, kv_start:kv_end], rScore)
                 for i, j in T.Parallel(BM, BN):
-                    rPc[i, j] = T.if_then_else(
-                        T.bitwise_and(tile_q_start + j < q_end, kv_start + i < Tk),
-                        rPc[i, j] + rScore[j, i], rPc[i, j]
-                    )
+                    rPc[i, j] += rScore[j, i]
 
             T.copy(LSE[bidz, tile_q_start:tile_q_end, bidy], rLSE)
             for i, j in T.Parallel(BM, BN):
@@ -388,10 +379,10 @@ def flash_attention_bwd_with_4d_mask_reduce(
                     )
             
             if has_mask:
-                T.copy(Mask[bidz, bidy, tile_q_start:tile_q_end, kv_start:kv_end])
+                T.copy(Mask[bidz, bidy, tile_q_start:tile_q_end, kv_start:kv_end], rMask)
                 for i, j in T.Parallel(BM, BN):
                     rPc[i, j] = T.if_then_else(
-                        T.bitwise_and(tile_q_start + j < q_end, kv_start + i < Tk) and rMask[j, i] ==1 ,
+                        rMask[j, i] == 1,
                         rPc[i, j], 0
                     )
             
@@ -413,9 +404,9 @@ def flash_attention_bwd_with_4d_mask_reduce(
                 T.atomic_add(dQ[bidz, tile_q_start + i, bidy, j], rdQ[i, j])
 
         T.copy(rdV, sdV)
-        T.copy(sdV, dV[bidz, kv_start:kv_end, key_head, :])
+        T.copy(sdV, dV[bidy % head_group, bidz, kv_start:kv_end, key_head, :])
         T.copy(rdK, sdK)
-        T.copy(sdK, dK[bidz, kv_start:kv_end, key_head, :])
+        T.copy(sdK, dK[bidy % head_group, bidz, kv_start:kv_end, key_head, :])
 
 @lru_cache
 def get_cc() -> int:
@@ -473,6 +464,7 @@ class _flash_attention_with_4d_mask(torch.autograd.Function):
         ctx.use_atomic_backward = use_atomic_backward
         ctx.has_mask = has_mask
         ctx.has_score = has_score
+        ctx.bhsd_input = bhsd_input
 
         return O.transpose(1, 2) if bhsd_input else O
     
@@ -484,6 +476,7 @@ class _flash_attention_with_4d_mask(torch.autograd.Function):
         use_atomic_backward = ctx.use_atomic_backward
         has_mask = ctx.has_mask
         has_score = ctx.has_score
+        bhsd_input = ctx.bhsd_input
 
         mask_arg = Mask if has_mask else None
         score_arg = Score if has_score else None
@@ -516,13 +509,18 @@ class _flash_attention_with_4d_mask(torch.autograd.Function):
             dK = torch.empty([kv_group, B, Tk, Hk, D], dtype=Q.dtype, device=Q.device)
             dV = torch.empty([kv_group, B, Tk, Hk, D], dtype=Q.dtype, device=Q.device)
             flash_attention_bwd_with_4d_mask_reduce(
-                Q, K, V, dO, LSE, Delta, Mask, Score, dQ, dK, dV,
+                Q, K, V, dO, LSE, Delta, mask_arg, score_arg, dQ, dK, dV,
                 scale, has_mask, has_score, is_causal, getattr(T, str(Q.dtype).split('.')[-1]),
                 BM=128, BN=32, Pipeline=2, Threads=256,
             )
             dK = dK.sum(0)
             dV = dV.sum(0)
         
+        if bhsd_input:
+            dQ = dQ.transpose(1, 2)
+            dK = dK.transpose(1, 2)
+            dV = dV.transpose(1, 2)
+
         return dQ, dK, dV, None, None, None, None, None, None, None, None
 
 flash_attention_with_4d_mask = _flash_attention_with_4d_mask.apply
