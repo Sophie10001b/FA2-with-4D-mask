@@ -78,8 +78,6 @@ def fa2_call(
         mask,
         score,
         scale,
-        mask is not None,
-        score is not None,
         is_causal,
         use_atomic_backward,
         bhsd_input,

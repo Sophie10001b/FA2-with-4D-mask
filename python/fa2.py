@@ -72,8 +72,7 @@ def flash_attention_fwd_with_4d_mask(
 
         T.copy(Q[bidz, q_start:q_end, query_head, :], sQ, disable_tma=True)
         kv_start = 0
-        kv_end = Tk
-        if is_causal: kv_end = T.min(kv_end, q_end)
+        kv_end = T.min(Tk, q_end) if is_causal else Tk
         iter_num = T.max(0, T.cdiv(kv_end - kv_start, BN))
 
         for it in T.Pipelined(iter_num, num_stages=Pipeline):
@@ -413,6 +412,10 @@ def get_cc() -> int:
     major, minor = torch.cuda.get_device_capability()
     return major * 10 + minor
 
+def get_contiguous(x: torch.Tensor) -> torch.Tensor:
+    if not x.is_contiguous(): return x.contiguous()
+    return x
+
 class _flash_attention_with_4d_mask(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -420,17 +423,15 @@ class _flash_attention_with_4d_mask(torch.autograd.Function):
         Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor,
         Mask: Optional[torch.Tensor]=None, Score: Optional[torch.Tensor]=None,
         scale: Optional[float]=None,
-        has_mask: Optional[bool]=False,
-        has_score: Optional[bool]=False,
         is_causal: Optional[bool]=False,
         use_atomic_backward: Optional[bool]=True,
         bhsd_input: Optional[bool]=True,
     ):
         assert Q.dim() == 4 and K.dim() ==4 and V.dim() == 4
         if bhsd_input:
-            Q = Q.transpose(1, 2).contiguous()
-            K = K.transpose(1, 2).contiguous()
-            V = V.transpose(1, 2).contiguous()
+            Q = get_contiguous(Q.transpose(1, 2))
+            K = get_contiguous(K.transpose(1, 2))
+            V = get_contiguous(V.transpose(1, 2))
 
         B, Tq, Hq, D = Q.shape
         _, Tk, Hk, _ = K.shape
@@ -447,8 +448,8 @@ class _flash_attention_with_4d_mask(torch.autograd.Function):
             BN = 64
             Pipeline = 2
         
-        if Mask != None: has_mask = True
-        if Score != None: has_score = True
+        has_mask = False if Mask == None else True
+        has_score = False if Score == None else True
 
         O = torch.empty([B, Tq, Hq, D], dtype=Q.dtype, device=Q.device)
         LSE = torch.empty([B, Tq, Hq], dtype=torch.float32, device=Q.device)
@@ -477,6 +478,8 @@ class _flash_attention_with_4d_mask(torch.autograd.Function):
         has_mask = ctx.has_mask
         has_score = ctx.has_score
         bhsd_input = ctx.bhsd_input
+
+        if bhsd_input: dO = get_contiguous(dO.transpose(1, 2))
 
         mask_arg = Mask if has_mask else None
         score_arg = Score if has_score else None
@@ -521,6 +524,6 @@ class _flash_attention_with_4d_mask(torch.autograd.Function):
             dK = dK.transpose(1, 2)
             dV = dV.transpose(1, 2)
 
-        return dQ, dK, dV, None, None, None, None, None, None, None, None
+        return dQ, dK, dV, None, None, None, None, None, None
 
 flash_attention_with_4d_mask = _flash_attention_with_4d_mask.apply
