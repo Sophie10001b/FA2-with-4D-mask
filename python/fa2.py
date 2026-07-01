@@ -255,7 +255,13 @@ def flash_attention_bwd_with_4d_mask_atomic(
             if is_causal:
                 for i, j in T.Parallel(BM, BN):
                     rPc[i, j] = T.if_then_else(
-                        T.bitwise_and(tile_q_start + j < q_end, tile_q_start + j >= kv_start + i),
+                        T.bitwise_and(T.bitwise_and(tile_q_start + j < q_end, kv_start + i < Tk), tile_q_start + j >= kv_start + i),
+                        rPc[i, j], 0
+                    )
+            else:
+                for i, j in T.Parallel(BM, BN):
+                    rPc[i, j] = T.if_then_else(
+                        T.bitwise_and(tile_q_start + j < q_end, kv_start + i < Tk),
                         rPc[i, j], 0
                     )
             
@@ -373,7 +379,13 @@ def flash_attention_bwd_with_4d_mask_reduce(
             if is_causal:
                 for i, j in T.Parallel(BM, BN):
                     rPc[i, j] = T.if_then_else(
-                        T.bitwise_and(tile_q_start + j < q_end, tile_q_start + j >= kv_start + i),
+                        T.bitwise_and(T.bitwise_and(tile_q_start + j < q_end, kv_start + i < Tk), tile_q_start + j >= kv_start + i),
+                        rPc[i, j], 0
+                    )
+            else:
+                for i, j in T.Parallel(BM, BN):
+                    rPc[i, j] = T.if_then_else(
+                        T.bitwise_and(tile_q_start + j < q_end, kv_start + i < Tk),
                         rPc[i, j], 0
                     )
             
