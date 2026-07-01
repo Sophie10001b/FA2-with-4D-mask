@@ -172,6 +172,10 @@ def bwd_preprocess(
         T.reduce_sum(rAcc, rDelta)
         T.copy(rDelta, Delta[bidz, bidy, q_start:q_end])
 
+def make_dq_layout(dQ):
+    # atomicAdd can not be vectorized, so we need to reorder dq to match the 8x8 gemm fragment
+    return T.Layout(dQ.shape, lambda b, t, h, d: [b, t // 8, h, d // 8, (d % 2), 4 * (t % 8) + (d % 8) // 2])
+
 @tilelang.jit(pass_configs=PASS_CFG)
 def flash_attention_bwd_with_4d_mask_atomic(
     Q, K, V, dO, LSE, Delta, Mask, Score, dQ, dK, dV,
@@ -221,6 +225,10 @@ def flash_attention_bwd_with_4d_mask_atomic(
         rdV = T.alloc_fragment([BM, D], accum_dtype)
         rLSE = T.alloc_fragment([BN], accum_dtype)
         rDelta = T.alloc_fragment([BN], accum_dtype)
+
+        T.annotate_layout(
+            {dQ: make_dq_layout(dQ)}
+        )
 
         kv_start = bidx * BM
         kv_end = kv_start + BM
@@ -345,6 +353,10 @@ def flash_attention_bwd_with_4d_mask_reduce(
         rdV = T.alloc_fragment([BM, D], accum_dtype)
         rLSE = T.alloc_fragment([BN], accum_dtype)
         rDelta = T.alloc_fragment([BN], accum_dtype)
+
+        T.annotate_layout(
+            {dQ: make_dq_layout(dQ)}
+        )
 
         kv_start = bidx * BM
         kv_end = kv_start + BM
