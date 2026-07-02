@@ -156,21 +156,27 @@ def bwd_preprocess(
     Delta: T.Tensor[[B, Hq, Tq], accum_dtype]
 
     with T.Kernel(T.cdiv(Tq, BM), Hq, B, threads=Threads) as (bidx, bidy, bidz):
-        rO = T.alloc_fragment([BM, BK], dtype)
-        rdO = T.alloc_fragment([BM, BK], dtype)
+        rO = T.alloc_fragment([BM, BK], accum_dtype)
+        rdO = T.alloc_fragment([BM, BK], accum_dtype)
         rAcc = T.alloc_fragment([BM, BK], accum_dtype)
         rDelta = T.alloc_fragment([BM], accum_dtype)
 
         q_start = bidx * BM
-        q_end = q_start + BM
         T.clear(rAcc)
         for it in range(T.cdiv(D, BK)):
-            T.copy(O[bidz, q_start:q_end, bidy, it * BK:(it + 1) * BK], rO)
-            T.copy(dO[bidz, q_start:q_end, bidy, it * BK:(it + 1) * BK], rdO)
+            for i, j in T.Parallel(BM, BK):
+                if T.bitwise_and(q_start + i < Tq, it * BK + j < D):
+                    rO[i, j] = O[bidz, q_start + i, bidy, it * BK + j]
+                    rdO[i, j] = dO[bidz, q_start + i, bidy, it * BK + j]
+                else:
+                    rO[i, j] = 0.0
+                    rdO[i, j] = 0.0
             for i, j in T.Parallel(BM, BK):
                 rAcc[i, j] += rO[i, j] * rdO[i, j]
-        T.reduce_sum(rAcc, rDelta)
-        T.copy(rDelta, Delta[bidz, bidy, q_start:q_end])
+        T.reduce_sum(rAcc, rDelta, dim=1)
+        for i in T.Parallel(BM):
+            if q_start + i < Tq:
+                Delta[bidz, bidy, q_start + i] = rDelta[i]
 
 @tilelang.jit(pass_configs=PASS_CFG)
 def flash_attention_bwd_with_4d_mask_atomic(

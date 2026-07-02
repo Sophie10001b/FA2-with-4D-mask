@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -84,8 +86,30 @@ def fa2_call(
     )
 
 
+def sdpa_flash_ref(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    scale: float,
+    is_causal: bool,
+) -> torch.Tensor:
+    with sdpa_kernel([SDPBackend.FLASH_ATTENTION]):
+        return F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=is_causal,
+            scale=scale,
+            enable_gqa=True,
+        )
+
+
 def make_mask(B: int, Hq: int, Tq: int, Tk: int, keep_prob: float, device: torch.device) -> torch.Tensor:
-    mask = torch.rand((B, Hq, Tq, Tk), device=device) < keep_prob
+    mask = torch.empty((B, Hq, Tq, Tk), device=device, dtype=torch.bool)
+    mask.bernoulli_(keep_prob)
     # Guarantee at least one valid key per query row to avoid all -inf softmax rows.
     q_idx = torch.arange(Tq, device=device)
     safe_k = torch.clamp(q_idx, max=Tk - 1)
@@ -218,8 +242,28 @@ def run_forward_case(args: argparse.Namespace, case: Case) -> bool:
     stats = diff_stats(actual, expected)
     print_stats("forward diff", stats)
     ok = case_passed(stats, args.atol, args.rtol)
+
+    sdpa_out = None
+    if args.check_sdpa and mask is None and score is None:
+        try:
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            sdpa_out = sdpa_flash_ref(q, k, v, scale=scale, is_causal=case.is_causal)
+            torch.cuda.synchronize()
+            print(f"sdpa flash ref ok in {(time.perf_counter() - t0) * 1e3:.3f} ms")
+            sdpa_eager_stats = diff_stats(sdpa_out, expected)
+            print_stats("sdpa vs eager diff", sdpa_eager_stats)
+            fa2_sdpa_stats = diff_stats(actual, sdpa_out)
+            print_stats("fa2 vs sdpa diff", fa2_sdpa_stats)
+            ok = case_passed(sdpa_eager_stats, args.atol, args.rtol) and ok
+            ok = case_passed(fa2_sdpa_stats, args.atol, args.rtol) and ok
+        except Exception:
+            print("sdpa flash ref FAILED")
+            traceback.print_exc(limit=args.traceback_limit)
+            ok = False
+
     print("forward result:", "PASS" if ok else "FAIL")
-    del q, k, v, mask, score, actual, expected
+    del q, k, v, mask, score, actual, expected, sdpa_out
     torch.cuda.empty_cache()
     gc.collect()
     return ok
@@ -292,6 +336,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ref-block", type=int, default=128, help="Query rows per eager-reference block; <=0 uses a full logits tensor.")
     parser.add_argument("--cases", nargs="+", choices=sorted(CASES), default=list(CASES))
     parser.add_argument("--check-backward", action="store_true")
+    parser.add_argument("--check-sdpa", action=argparse.BooleanOptionalAction, default=True, help="Also compare no-mask/no-score cases with PyTorch SDPA flash backend.")
     parser.add_argument("--use-atomic-backward", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--atol", type=float, default=5e-2)
     parser.add_argument("--rtol", type=float, default=5e-2)
