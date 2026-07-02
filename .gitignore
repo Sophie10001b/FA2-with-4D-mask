@@ -16,3 +16,4 @@ profiler_logs
 /logs
 /analysis_tmp
 TASK.md
+ncu.sh
