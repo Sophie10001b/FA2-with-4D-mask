@@ -309,10 +309,40 @@ def run_backward_case(args: argparse.Namespace, case: Case) -> bool:
         return False
 
     ok = True
+    grads_sdpa = None
+    if args.check_sdpa and mask is None and score is None:
+        q_sdpa = q.detach().clone().requires_grad_(True)
+        k_sdpa = k.detach().clone().requires_grad_(True)
+        v_sdpa = v.detach().clone().requires_grad_(True)
+        sdpa_out = None
+        try:
+            sdpa_out = sdpa_flash_ref(q_sdpa, k_sdpa, v_sdpa, scale=scale, is_causal=case.is_causal)
+            sdpa_out.backward(grad)
+            torch.cuda.synchronize()
+            grads_sdpa = (q_sdpa.grad, k_sdpa.grad, v_sdpa.grad)
+            print("sdpa flash backward ok")
+        except Exception:
+            print("sdpa flash backward FAILED")
+            traceback.print_exc(limit=args.traceback_limit)
+            ok = False
+        finally:
+            del q_sdpa, k_sdpa, v_sdpa, sdpa_out
+
     for name, actual_grad, expected_grad in zip(("dQ", "dK", "dV"), grads_actual, grads_expected):
         stats = diff_stats(actual_grad, expected_grad)
         print_stats(f"{name} diff", stats)
         ok = case_passed(stats, args.atol, args.rtol) and ok
+
+    if grads_sdpa is not None:
+        for name, sdpa_grad, expected_grad in zip(("dQ", "dK", "dV"), grads_sdpa, grads_expected):
+            stats = diff_stats(sdpa_grad, expected_grad)
+            print_stats(f"sdpa {name} vs eager diff", stats)
+            ok = case_passed(stats, args.atol, args.rtol) and ok
+        for name, actual_grad, sdpa_grad in zip(("dQ", "dK", "dV"), grads_actual, grads_sdpa):
+            stats = diff_stats(actual_grad, sdpa_grad)
+            print_stats(f"fa2 {name} vs sdpa diff", stats)
+            ok = case_passed(stats, args.atol, args.rtol) and ok
+
     print("backward result:", "PASS" if ok else "FAIL")
     torch.cuda.empty_cache()
     gc.collect()

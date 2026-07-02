@@ -17,3 +17,5 @@ profiler_logs
 /analysis_tmp
 TASK.md
 ncu.sh
+dist
+*.egg-info

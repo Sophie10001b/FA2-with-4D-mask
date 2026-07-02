@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tilelang-fa2-4d-mask"
+version = "0.1.0"
+description = "TileLang FlashAttention-2 forward/backward kernels with optional 4D mask and score support"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "tilelang==0.1.11",
+    "apache-tvm-ffi==0.1.11",
+]
+
+[project.urls]
+Repository = "https://github.com/Sophie10001b/FA2-with-4D-mask"
+
+[tool.setuptools.packages.find]
+include = [
+    "python",
+    "python.*",
+    "tilelang_fa2_4d_mask",
+    "tilelang_fa2_4d_mask.*",
+]
+exclude = [
+    "benchmark",
+    "benchmark.*",
+]
